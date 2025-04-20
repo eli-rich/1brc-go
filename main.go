@@ -195,6 +195,7 @@ func main() {
 		}
 	}
 	dumpSorted(result)
+	fmt.Printf("\n")
 	fmt.Println(time.Since(startTime))
 }
 
@@ -208,16 +209,15 @@ func dumpSorted(result map[string]*Stats) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	fmt.Printf("{")
 	for i, key := range keys {
 		st := result[key]
 		minOut := roundCeil(st.min)
 		meanOut := roundCeil(st.sum / float64(st.count))
 		maxOut := roundCeil(st.max)
 		if i == len(keys)-1 {
-			fmt.Printf("%s=%.1f/%f/%.1f}", key, minOut, meanOut, maxOut)
+			fmt.Printf("%s=%.1f/%.1f/%.1f", key, minOut, meanOut, maxOut)
 		} else {
-			fmt.Printf("%s=%.1f/%f/%.1f, ", key, minOut, meanOut, maxOut)
+			fmt.Printf("%s=%.1f/%.1f/%.1f\n", key, minOut, meanOut, maxOut)
 		}
 	}
 }
