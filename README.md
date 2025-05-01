@@ -1,6 +1,6 @@
 # One Billion Row Challenge (1BRC) - Go Implementation
 
-[![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/eli-rich/1brc-go?logo=go)](https://golang.org)
 
 This repository contains a high-performance Go implementation of the [One Billion Row Challenge](https://github.com/gunnarmorling/1brc), a benchmark task that processes a large dataset of weather station measurements.
 
