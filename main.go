@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log"
@@ -12,7 +13,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"unsafe"
+	"time"
+	"unicode"
 )
 
 type Stats struct {
@@ -20,11 +22,6 @@ type Stats struct {
 	max   int
 	sum   int
 	count int
-}
-
-type Leftover struct {
-	buffer [20]byte
-	size   int
 }
 
 func loadData(filePath string) ([]byte, error) {
@@ -84,12 +81,15 @@ func parseFloatAsInt(b []byte) int {
 	return intValue
 }
 
-func processLine(line []byte, m map[string]*Stats) map[string]*Stats {
+func processLine(line []byte, m map[string]*Stats) {
 	for i := range line {
 		if line[i] == ';' {
-			key := unsafeStr(line[:i])
-			temp := parseFloatAsInt(line[i+1 : bytes.LastIndexByte(line, '\n')])
-
+			key := string(line[:i])
+			last := bytes.LastIndexByte(line, '\n')
+			if last == -1 {
+				last = len(line)
+			}
+			temp := parseFloatAsInt(line[i+1 : last])
 			st, ok := m[key]
 			if !ok {
 				m[key] = &Stats{
@@ -107,53 +107,59 @@ func processLine(line []byte, m map[string]*Stats) map[string]*Stats {
 			break
 		}
 	}
-	return m
 }
 
-func processChunk(index int, chunk []byte, first bool, m map[string]*Stats) (*Leftover, map[string]*Stats) {
-	leftover := &Leftover{
-		buffer: [20]byte{},
-		size:   0,
-	}
-	pos := 0
-	if !first {
-		appendIdx := bytes.IndexByte(chunk, '\n')
-		for i := range appendIdx {
-			leftover.buffer[leftover.size+i] = chunk[i]
-		}
-		m = processLine(leftover.buffer[:leftover.size+appendIdx], m)
-		leftover.size = 0
-		pos = appendIdx + 1
-	}
+func findChunkBounds(data []byte, cores int) []int {
+	size := len(data)
+	bounds := make([]int, cores+1)
 
-	lineBuf := make([]byte, 20)
-	lineIdx := 0
-	for ; pos < len(chunk); pos++ {
-		lineBuf[lineIdx] = chunk[pos]
-		if chunk[pos] == '\n' {
-			m = processLine(lineBuf[:lineIdx+1], m)
-			lineIdx = 0
-			continue
+	bounds[0] = 0
+	bounds[cores] = size
+
+	chunkSize := size / cores
+
+	for i := 1; i < cores; i++ {
+		pos := i * chunkSize
+
+		// Find next newline
+		for pos < size && data[pos] != '\n' {
+			pos++
 		}
-		lineIdx++
+		if pos < size {
+			pos++
+		}
+		bounds[i] = pos
 	}
-	if lineIdx > 0 {
-		copy(leftover.buffer[:], lineBuf[:lineIdx])
-		leftover.size = lineIdx
-	}
-	return leftover, m
+	return bounds
 }
 
-func unsafeStr(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
+func processChunk(chunk []byte, start, end int) map[string]*Stats {
+	localMap := make(map[string]*Stats)
+	pos := start
+	for pos < end {
+		nextNewline := bytes.IndexByte(chunk[pos:end], '\n')
+		if nextNewline == -1 {
+			if end == len(chunk) {
+				processLine(chunk[pos:end], localMap)
+			}
+			break
+		}
+		lineEnd := pos + nextNewline
+		processLine(chunk[pos:lineEnd+1], localMap)
+		pos = lineEnd + 1
+	}
+	return localMap
 }
 
 func main() {
+	startTotal := time.Now()
 	debug.SetGCPercent(-1)
-	if len(os.Args) != 2 {
+	if len(os.Args) != 3 {
 		log.Fatalf("usage: %s <file_path>\n", os.Args[0])
 	}
 	filePath := os.Args[1]
+	outpath := os.Args[2]
+	startLoad := time.Now()
 	data, err := loadData(filePath)
 	if err != nil {
 		log.Fatalf("error mmaping file: %v\n", err)
@@ -164,27 +170,54 @@ func main() {
 		}
 	}()
 
+	loadDuration := time.Since(startLoad)
+	startProcess := time.Now()
+
 	cores := runtime.NumCPU()
-	shards := make([]map[string]*Stats, cores)
-
-	partialLines := make([][]byte, cores)
-	var partialMutex sync.Mutex
-
-	// merge shards
-	result := make(map[string]*Stats, len(shards[0]))
-	for _, m := range shards {
-		for key, st := range m {
-			if sst, ok := result[key]; ok {
-				sst.count += st.count
-				sst.sum += st.sum
-				sst.min = min(st.min, sst.min)
-				sst.max = max(st.max, sst.max)
-			} else {
-				result[key] = st
-			}
-		}
+	if len(data) < cores*1000 {
+		cores = 1
 	}
-	dumpSorted(result)
+
+	bounds := findChunkBounds(data, cores)
+
+	var wg sync.WaitGroup
+	resultsChan := make(chan map[string]*Stats, cores)
+
+	for i := range cores {
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			result := processChunk(data, start, end)
+			resultsChan <- result
+		}(bounds[i], bounds[i+1])
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	workerResults := make([]map[string]*Stats, 0, cores)
+	for result := range resultsChan {
+		workerResults = append(workerResults, result)
+	}
+	finalResult := mergeMaps(workerResults)
+
+	processDuration := time.Since(startProcess)
+	startOutput := time.Now()
+
+	outfile, err := os.Create(outpath)
+	if err != nil {
+		log.Fatalf("error creating output file: %v\n", err)
+	}
+	defer outfile.Close()
+	writer := bufio.NewWriter(outfile)
+	dumpSorted(finalResult, writer)
+
+	outputDuration := time.Since(startOutput)
+	totalDuration := time.Since(startTotal)
+
+	PrintPerformanceReport(loadDuration, processDuration, outputDuration, totalDuration, len(data), cores)
 }
 
 func roundCeil(n float64) float64 {
@@ -201,13 +234,59 @@ func roundCeil(n float64) float64 {
 	return result
 }
 
-func dumpSorted(result map[string]*Stats) {
+func sanitize(s string) string {
+	var result strings.Builder
+	for _, r := range s {
+		isLower := r >= 'a' && r <= 'z'
+		isUpper := r >= 'A' && r <= 'Z'
+		isDigit := r >= '0' && r <= '9'
+		if isLower || isUpper || isDigit {
+			result.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return result.String()
+}
+
+func mergeStats(target, source *Stats) {
+	target.count += source.count
+	target.sum += source.sum
+	target.min = min(target.min, source.min)
+	target.max = max(target.max, source.max)
+}
+
+func mergeMaps(workerMaps []map[string]*Stats) map[string]*Stats {
+	finalMap := make(map[string]*Stats)
+	for _, workerMap := range workerMaps {
+		for key, stats := range workerMap {
+			if current, ok := finalMap[key]; ok {
+				mergeStats(current, stats)
+			} else {
+				finalMap[key] = &Stats{
+					min:   stats.min,
+					max:   stats.max,
+					sum:   stats.sum,
+					count: stats.count,
+				}
+			}
+		}
+	}
+	return finalMap
+}
+
+func dumpSorted(result map[string]*Stats, w *bufio.Writer) {
 	keys := make([]string, 0, len(result))
 	for key := range result {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		return strings.ToLower(keys[i]) < strings.ToLower(keys[j])
+		cleanFirst := sanitize(keys[i])
+		cleanSecond := sanitize(keys[j])
+
+		if cleanFirst != cleanSecond {
+			return cleanFirst < cleanSecond
+		}
+
+		return keys[i] < keys[j]
 	})
 	for i, key := range keys {
 		st := result[key]
@@ -215,9 +294,10 @@ func dumpSorted(result map[string]*Stats) {
 		meanOut := roundCeil(float64(st.sum) / float64(st.count) / 10.0)
 		maxOut := float64(st.max) / 10
 		if i == len(keys)-1 {
-			fmt.Printf("%s=%.1f/%.1f/%.1f", key, minOut, meanOut, maxOut)
+			fmt.Fprintf(w, "%s=%.1f/%.1f/%.1f", key, minOut, meanOut, maxOut)
 		} else {
-			fmt.Printf("%s=%.1f/%.1f/%.1f\n", key, minOut, meanOut, maxOut)
+			fmt.Fprintf(w, "%s=%.1f/%.1f/%.1f\n", key, minOut, meanOut, maxOut)
 		}
 	}
+	w.Flush()
 }
