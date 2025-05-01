@@ -4,7 +4,7 @@
 
 This repository contains a high-performance Go implementation of the [One Billion Row Challenge](https://github.com/gunnarmorling/1brc), a benchmark task that processes a large dataset of weather station measurements.
 
-**Note: this implementation is using the challenge and data format from [my modified version](https://github.com/eli-rich/1brc-gen). But the core concept is the same.**
+**⚠️ Note:** this implementation is using the challenge and data format from [my modified version](https://github.com/eli-rich/1brc-gen). But the core concept is the same.
 
 ## 📖 What is the 1BRC?
 
